@@ -7,19 +7,43 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/grafana/grafana/pkg/api"
 	"github.com/grafana/grafana/pkg/api/dtos"
 	"github.com/grafana/grafana/pkg/api/response"
+	"github.com/grafana/grafana/pkg/api/routing"
 	"github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/services/accesscontrol"
 	"github.com/grafana/grafana/pkg/services/dashboards"
 	"github.com/grafana/grafana/pkg/services/datasources"
+	pubdash "github.com/grafana/grafana/pkg/services/publicdashboards"
+	"github.com/grafana/grafana/pkg/services/query"
 	"github.com/grafana/grafana/pkg/web"
 )
 
+type PublicDashboardAPI struct {
+	RouteRegister          routing.RouteRegister
+	PublicDashboardService pubdash.PublicDashboardService
+	AccessControl          accesscontrol.AccessControl
+	HS                     *api.HTTPServer
+	queryDataService       *query.Service
+}
+
+func (api *PublicDashboardAPI) RegisterAPIEndpoints() {
+	// Access Public Dashboard
+	api.RouteRegister.Get("/public-dashboards/:accessToken", SetPublicDashboardFlag(), api.HS.Index)
+	api.RouteRegister.Get("/api/public/dashboards/:accessToken", routing.Wrap(api.GetPublicDashboard))
+	api.RouteRegister.Post("/api/public/dashboards/:accessToken/panels/:panelId/query", routing.Wrap(api.QueryPublicDashboard))
+
+	// Create/Update Public Dashboard
+	api.RouteRegister.Get("/dashboards/uid/:uid/public-config", authorize(reqSignedIn, ac.EvalPermission(dashboards.ActionDashboardsWrite)), routing.Wrap(api.GetPublicDashboardConfig))
+	api.RouteRegister.Post("/dashboards/uid/:uid/public-config", authorize(reqSignedIn, ac.EvalPermission(dashboards.ActionDashboardsWrite)), routing.Wrap(api.SavePublicDashboardConfig))
+}
+
 // gets public dashboard
-func (hs *HTTPServer) GetPublicDashboard(c *models.ReqContext) response.Response {
+func (api *PublicDashboardAPI) GetPublicDashboard(c *models.ReqContext) response.Response {
 	accessToken := web.Params(c.Req)[":accessToken"]
 
-	dash, err := hs.dashboardService.GetPublicDashboard(c.Req.Context(), accessToken)
+	dash, err := api.PublicDashboardService.GetPublicDashboard(c.Req.Context(), accessToken)
 	if err != nil {
 		return handleDashboardErr(http.StatusInternalServerError, "Failed to get public dashboard", err)
 	}
@@ -46,8 +70,8 @@ func (hs *HTTPServer) GetPublicDashboard(c *models.ReqContext) response.Response
 }
 
 // gets public dashboard configuration for dashboard
-func (hs *HTTPServer) GetPublicDashboardConfig(c *models.ReqContext) response.Response {
-	pdc, err := hs.dashboardService.GetPublicDashboardConfig(c.Req.Context(), c.OrgId, web.Params(c.Req)[":uid"])
+func (api *PublicDashboardAPI) GetPublicDashboardConfig(c *models.ReqContext) response.Response {
+	pdc, err := api.PublicDashboardService.GetPublicDashboardConfig(c.Req.Context(), c.OrgId, web.Params(c.Req)[":uid"])
 	if err != nil {
 		return handleDashboardErr(http.StatusInternalServerError, "Failed to get public dashboard config", err)
 	}
@@ -55,7 +79,7 @@ func (hs *HTTPServer) GetPublicDashboardConfig(c *models.ReqContext) response.Re
 }
 
 // sets public dashboard configuration for dashboard
-func (hs *HTTPServer) SavePublicDashboardConfig(c *models.ReqContext) response.Response {
+func (api *PublicDashboardAPI) SavePublicDashboardConfig(c *models.ReqContext) response.Response {
 	pubdash := &models.PublicDashboard{}
 	if err := web.Bind(c.Req, pubdash); err != nil {
 		return response.Error(http.StatusBadRequest, "bad request data", err)
@@ -71,7 +95,7 @@ func (hs *HTTPServer) SavePublicDashboardConfig(c *models.ReqContext) response.R
 		PublicDashboard: pubdash,
 	}
 
-	pubdash, err := hs.dashboardService.SavePublicDashboardConfig(c.Req.Context(), &dto)
+	pubdash, err := api.PublicDashboardService.SavePublicDashboardConfig(c.Req.Context(), &dto)
 	if err != nil {
 		return handleDashboardErr(http.StatusInternalServerError, "Failed to save public dashboard configuration", err)
 	}
@@ -81,23 +105,23 @@ func (hs *HTTPServer) SavePublicDashboardConfig(c *models.ReqContext) response.R
 
 // QueryPublicDashboard returns all results for a given panel on a public dashboard
 // POST /api/public/dashboard/:accessToken/panels/:panelId/query
-func (hs *HTTPServer) QueryPublicDashboard(c *models.ReqContext) response.Response {
+func (api *PublicDashboardAPI) QueryPublicDashboard(c *models.ReqContext) response.Response {
 	panelId, err := strconv.ParseInt(web.Params(c.Req)[":panelId"], 10, 64)
 	if err != nil {
 		return response.Error(http.StatusBadRequest, "invalid panel ID", err)
 	}
 
-	dashboard, err := hs.dashboardService.GetPublicDashboard(c.Req.Context(), web.Params(c.Req)[":accessToken"])
+	dashboard, err := api.PublicDashboardService.GetPublicDashboard(c.Req.Context(), web.Params(c.Req)[":accessToken"])
 	if err != nil {
 		return response.Error(http.StatusInternalServerError, "could not fetch dashboard", err)
 	}
 
-	publicDashboard, err := hs.dashboardService.GetPublicDashboardConfig(c.Req.Context(), dashboard.OrgId, dashboard.Uid)
+	publicDashboard, err := api.PublicDashboardService.GetPublicDashboardConfig(c.Req.Context(), dashboard.OrgId, dashboard.Uid)
 	if err != nil {
 		return response.Error(http.StatusInternalServerError, "could not fetch public dashboard", err)
 	}
 
-	reqDTO, err := hs.dashboardService.BuildPublicDashboardMetricRequest(
+	reqDTO, err := api.PublicDashboardService.BuildPublicDashboardMetricRequest(
 		c.Req.Context(),
 		dashboard,
 		publicDashboard,
@@ -121,7 +145,7 @@ func (hs *HTTPServer) QueryPublicDashboard(c *models.ReqContext) response.Respon
 	permissions[datasources.ActionRead] = []string{datasourceScope}
 	anonymousUser.Permissions[dashboard.OrgId] = permissions
 
-	resp, err := hs.queryDataService.QueryDataMultipleSources(c.Req.Context(), anonymousUser, c.SkipCache, reqDTO, true)
+	resp, err := api.queryDataService.QueryDataMultipleSources(c.Req.Context(), anonymousUser, c.SkipCache, reqDTO, true)
 
 	if err != nil {
 		return hs.handleQueryMetricsError(err)

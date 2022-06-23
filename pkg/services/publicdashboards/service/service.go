@@ -12,6 +12,26 @@ import (
 	"github.com/grafana/grafana/pkg/services/dashboards"
 )
 
+type PublicDashboardServiceImpl struct {
+	log   log.Logger
+	cfg   *setting.Cfg
+	store PublicDashboardStore
+}
+
+func ProvidePublicDashboardService(cfg *setting.Cfg, store PublicDashboardStore) *service.PublicDashboardServiceImpl {
+	s := &PublicDashboardServiceImpl{
+		cfg:   cfg,
+		log:   log.New("publicdashboard"),
+		store: store,
+	}
+
+	return s
+}
+
+func (pd PublicDashboardService) IsDisabled() bool {
+	return !pd.cfg.IsFeatureToggleEnabled(featuremgmt.FlagPublicDashboards)
+}
+
 // Gets public dashboard via access token
 func (dr *DashboardServiceImpl) GetPublicDashboard(ctx context.Context, accessToken string) (*models.Dashboard, error) {
 	pubdash, d, err := dr.dashboardStore.GetPublicDashboard(ctx, accessToken)
